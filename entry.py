@@ -22,7 +22,8 @@ class DataSetProvider(object):
             img = Image.open("train_data/alphabet.png").convert("L")
             y_count = (int)(img.size[1] / h)
             print(y_count)
-            for x in range(26):
+            # for x in range(26):
+            for x in range(3):
                 dataset = []
                 for y in range(y_count):
                     rect = (x * w, y * h, x * w + w, y * h + h)
@@ -206,7 +207,11 @@ if __name__ == "__main__":
     else:
         target_data_set = {}
         for filename in os.listdir("target_images"):
-            img = Image.open("target_images/{}".format(filename)).resize((30, 30)).convert("L")
+            fullpath = "target_images/{}".format(filename)
+            if os.path.isdir(fullpath):
+                continue
+
+            img = Image.open(fullpath).resize((30, 30)).convert("L")
             target_data_set[filename.split(".")[0]] = \
                 (1. - (np.asarray(img) / 255)).reshape(1, 30, 30, 1)
 
