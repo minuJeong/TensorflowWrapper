@@ -1,3 +1,5 @@
 logs/
 model/
 mnist/
+train_data/debug/
+target_images/
