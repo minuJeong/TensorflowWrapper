@@ -1,6 +1,4 @@
 
-import os
-
 import tensorflow as tf
 import numpy as np
 from PIL import Image
@@ -53,7 +51,6 @@ class AbstractAgent(object):
     global_step = None
     session = None
     saver = None
-    writer = None
 
     def __init__(self):
         self.global_step = tf.Variable(0, trainable=False, name="global_step")
@@ -82,10 +79,6 @@ class AbstractAgent(object):
         else:
             print("no checkpoint is found,")
             self.session.run(tf.global_variables_initializer())
-
-        tf.summary.histogram("model", self.model)
-        tf.summary.scalar('cost', self.cost)
-        self.writer = tf.summary.FileWriter("./logs", self.session.graph)
         return self
 
     def __exit__(self, type, value, traceback):
@@ -103,7 +96,11 @@ class AbstractAgent(object):
 
         print("session disposed!")
 
-    def _train(self, dataset_provider):
+    def _train(self, dataset_provider=None):
+        """ override this """
+        pass
+
+    def _evaluate(self):
         """ override this """
         pass
 
@@ -111,85 +108,221 @@ class AbstractAgent(object):
         """ override this """
         pass
 
-    def train(self, dataset_provider):
+    def train(self, dataset_provider=None):
+        self.merge = tf.summary.merge_all()
         self._train(dataset_provider)
+
+    def evaluate(self):
+        self._evaluate()
 
     def predict(self, x):
         return self._predict(x)
 
 
-class CNNAgent(AbstractAgent):
+class GoogLeNetAgent(AbstractAgent):
     def _build_model(self) -> None:
-        self.LEARNING_RATE = 0.01
-        self.X = tf.placeholder(tf.float32, [None, 30, 30, 1], name="X")
-        self.Y = tf.placeholder(tf.float32, [None, 26], name="Y")
-        self.is_training = tf.placeholder(tf.bool)
+        """
+        Just following the googlenet example:
+         - https://github.com/tflearn/tflearn/blob/master/examples/images/googlenet.py
+        """
 
-        L1, L2, L3 = None, None, None
-        with tf.name_scope("layer1"):
-            L1 = tf.layers.dropout(
-                tf.layers.max_pooling2d(
-                    tf.layers.conv2d(self.X, filters=32, kernel_size=3),
-                    pool_size=2, strides=2),
-                0.8, self.is_training)
+        import tflearn
+        from tflearn.layers import core
+        from tflearn.layers import conv
+        from tflearn.layers import normalization
+        from tflearn.layers import merge_ops
+        from tflearn.layers import estimator
 
-        with tf.name_scope("layer2"):
-            L2 = tf.layers.dropout(
-                tf.layers.average_pooling2d(
-                    tf.layers.conv2d(L1, filters=64, kernel_size=3),
-                    pool_size=2, strides=2),
-                0.8, self.is_training)
+        from tflearn.datasets import oxflower17
 
-        with tf.name_scope("layer3"):
-            L3 = tf.layers.dropout(
-                tf.layers.max_pooling2d(
-                    tf.layers.conv2d(L2, filters=64, kernel_size=3),
-                    pool_size=2, strides=2),
-                0.8, self.is_training)
+        w = 227
+        h = 227
+        self.X, self.Y = oxflower17.load_data(one_hot=True, resize_pics=(w, h))
+        print("X, Y shape: ", self.X.shape, self.Y.shape)
 
-        with tf.name_scope("layer4"):
-            L4 = tf.layers.dropout(
-                tf.layers.dense(
-                    tf.contrib.layers.flatten(L3),
-                    256, activation=tf.nn.relu),
-                0.6, self.is_training)
+        data_input = core.input_data(shape=[None, w, h, 3])
+        conv1_7_7 = conv.conv_2d(data_input, 64, 7, strides=2, activation="relu", name="conv1_7_7_s2")
+        pool1_3_3 = normalization.local_response_normalization(
+            conv.max_pool_2d(conv1_7_7, 3, strides=2))
+        conv2_3_3 = normalization.local_response_normalization(
+            conv.conv_2d(
+                conv.conv_2d(
+                    pool1_3_3, 64, 1, activation="relu", name="conv2_3_3"),
+                182, 3, activation="relu"))
+        pool2_3_3 = conv.max_pool_2d(conv2_3_3, kernel_size=3, strides=2, name="pool2_3_3_s2")
 
-        self.model = tf.layers.dense(L4, 26, activation=None)
-        self.cost = tf.reduce_mean(
-            tf.nn.softmax_cross_entropy_with_logits(
-                logits=self.model, labels=self.Y))
-        self.optimizer = tf.train.AdamOptimizer(AbstractAgent.LEARNING_RATE)\
-            .minimize(self.cost, global_step=self.global_step)
+        # 3a
+        inception_3a_1_1 = conv.conv_2d(
+            pool2_3_3, 64, 1, activation="relu", name="inception_3a_1_1")
+        inception_3a_3_3 = conv.conv_2d(
+            conv.conv_2d(pool2_3_3, 96, 1, activation="relu"),
+            128, filter_size=3, activation="relu", name="inception_3a_3_3")
+        inception_3a_5_5 = conv.conv_2d(
+            conv.conv_2d(pool2_3_3, 16, filter_size=1, activation="relu"),
+            32, filter_size=5, activation="relu", name="inception_3a_5_5")
+        inception_3a_pool_1_1 = conv.conv_2d(
+            conv.max_pool_2d(pool2_3_3, kernel_size=3, strides=1, name="inception_3a_pool"),
+            32, filter_size=1, activation="relu", name="inception_3a_pool_1_1")
+        inception_3a_output = merge_ops.merge(
+            [inception_3a_1_1, inception_3a_3_3, inception_3a_5_5, inception_3a_pool_1_1],
+            mode="concat", axis=3)
 
-    def _train(self, dataset_provider):
-        merge = tf.summary.merge_all()
-        i = 0
-        for xs, ys in dataset_provider.iterate_batch():
-            x_feed = xs.reshape(-1, 30, 30, 1)
-            y_feed = ys.reshape(-1, 26)
-            feed_dict = {
-                self.X: x_feed,
-                self.Y: y_feed,
-                self.is_training: True
-            }
+        # 3b
+        inception_3b_1_1 = conv.conv_2d(
+            inception_3a_output, 128, 1, activation="relu", name="inception_3b_1_1")
+        inception_3b_3_3 = conv.conv_2d(
+            conv.conv_2d(inception_3a_output, 128, 1, activation="relu"),
+            192, filter_size=3, activation="relu", name="inception_3b_3_3")
+        inception_3b_5_5 = conv.conv_2d(
+            conv.conv_2d(inception_3a_output, 32, filter_size=1, activation="relu"),
+            96, filter_size=5, activation="relu", name="inception_3b_5_5")
+        inception_3b_pool_1_1 = conv.conv_2d(
+            conv.max_pool_2d(inception_3a_output, kernel_size=3, strides=1, name="inception_3b_pool"),
+            64, filter_size=1, activation="relu", name="inception_3b_pool_1_1")
+        inception_3b_output = merge_ops.merge(
+            [inception_3b_1_1, inception_3b_3_3, inception_3b_5_5, inception_3b_pool_1_1],
+            mode="concat", axis=3, name="inception_3b_output")
 
-            _, cost = self.run(
-                [self.optimizer, self.cost],
-                feed_dict=feed_dict)
+        pool3_3_3 = conv.max_pool_2d(
+            inception_3b_output, kernel_size=3, strides=2, name="pool3_3_3")
 
-            i += 1
-            if i % 30 == 0:
+        # 4a
+        inception_4a_1_1 = conv.conv_2d(
+            pool3_3_3, 192, filter_size=1, activation="relu", name="inception_4a_1_1")
+        inception_4a_3_3 = conv.conv_2d(
+            conv.conv_2d(pool3_3_3, 96, filter_size=1, activation="relu"),
+            208, filter_size=3, activation="relu", name="inception_4a_3_3")
+        inception_4a_5_5 = conv.conv_2d(
+            conv.conv_2d(pool3_3_3, 16, filter_size=1, activation="relu"),
+            48, filter_size=5, activation="relu", name="inception_4a_5_5")
+        inception_4a_pool_1_1 = conv.conv_2d(
+            conv.max_pool_2d(pool3_3_3, kernel_size=3, strides=1),
+            64, filter_size=1, name="inception_4a_pool")
+        inception_4a_output = merge_ops.merge(
+            [inception_4a_1_1, inception_4a_3_3, inception_4a_5_5, inception_4a_pool_1_1],
+            mode="concat", axis=3, name="inception_4a_output")
 
-                # print step
-                global_step_value = self.run(self.global_step)
-                print("Global step: ", global_step_value, "Cost: ", cost)
+        # 4b
+        inception_4b_1_1 = conv.conv_2d(
+            inception_4a_output, 160, filter_size=1, activation="relu", name="inception_4b_1_1")
+        inception_4b_3_3 = conv.conv_2d(
+            conv.conv_2d(inception_4a_output, 112, filter_size=1, activation="relu"),
+            224, filter_size=3, activation="relu", name="inception_4b_3_3")
+        inception_4b_5_5 = conv.conv_2d(
+            conv.conv_2d(inception_4a_output, 24, filter_size=1, activation="relu"),
+            64, filter_size=5, activation="relu", name="inception_4b_5_5")
+        inception_4b_pool_1_1 = conv.conv_2d(
+            conv.max_pool_2d(inception_4a_output, kernel_size=3, strides=1),
+            64, filter_size=1, name="inception_4b_pool")
+        inception_4b_output = merge_ops.merge(
+            [inception_4b_1_1, inception_4b_3_3, inception_4b_5_5, inception_4b_pool_1_1],
+            mode="concat", axis=3, name="inception_4b_output")
 
-                # report to tensor board
-                summary = self.run(merge, feed_dict=feed_dict)
-                self.writer.add_summary(summary, global_step=global_step_value)
+        # 4c
+        inception_4c_1_1 = conv.conv_2d(
+            inception_4b_output, 128, filter_size=1, activation="relu", name="inception_4c_1_1")
+        inception_4c_3_3 = conv.conv_2d(
+            conv.conv_2d(inception_4b_output, 128, filter_size=1, activation="relu"),
+            256, filter_size=3, activation="relu", name="inception_4c_3_3")
+        inception_4c_5_5 = conv.conv_2d(
+            conv.conv_2d(inception_4b_output, 24, filter_size=1, activation="relu"),
+            64, filter_size=5, activation="relu", name="inception_4c_5_5")
+        inception_4c_pool_1_1 = conv.conv_2d(
+            conv.max_pool_2d(inception_4b_output, kernel_size=3, strides=1),
+            64, filter_size=1, name="inception_4c_pool")
+        inception_4c_output = merge_ops.merge(
+            [inception_4c_1_1, inception_4c_3_3, inception_4c_5_5, inception_4c_pool_1_1],
+            mode="concat", axis=3, name="inception_4c_output")
 
-                # print progress
-                print("Y: ", chr(self.run(tf.argmax(self.Y, 1), feed_dict={self.Y: y_feed}) + 97))
+        # 4d
+        inception_4d_1_1 = conv.conv_2d(
+            inception_4c_output, 112, filter_size=1, activation="relu", name="inception_4d_1_1")
+        inception_4d_3_3 = conv.conv_2d(
+            conv.conv_2d(inception_4c_output, 144, filter_size=1, activation="relu"),
+            288, filter_size=3, activation="relu", name="inception_4d_3_3")
+        inception_4d_5_5 = conv.conv_2d(
+            conv.conv_2d(inception_4c_output, 32, filter_size=1, activation="relu"),
+            64, filter_size=5, activation="relu", name="inception_4d_5_5")
+        inception_4d_pool_1_1 = conv.conv_2d(
+            conv.max_pool_2d(inception_4c_output, kernel_size=3, strides=1),
+            64, filter_size=1, name="inception_4d_pool")
+        inception_4d_output = merge_ops.merge(
+            [inception_4d_1_1, inception_4d_3_3, inception_4d_5_5, inception_4d_pool_1_1],
+            mode="concat", axis=3, name="inception_4d_output")
+
+        # 4e
+        inception_4e_1_1 = conv.conv_2d(
+            inception_4d_output, 256, filter_size=1, activation="relu", name="inception_4d_1_1")
+        inception_4e_3_3 = conv.conv_2d(
+            conv.conv_2d(inception_4d_output, 160, filter_size=1, activation="relu"),
+            320, filter_size=3, activation="relu", name="inception_4d_3_3")
+        inception_4e_5_5 = conv.conv_2d(
+            conv.conv_2d(inception_4d_output, 32, filter_size=1, activation="relu"),
+            128, filter_size=5, activation="relu", name="inception_4d_5_5")
+        inception_4e_pool_1_1 = conv.conv_2d(
+            conv.max_pool_2d(inception_4d_output, kernel_size=3, strides=1),
+            128, filter_size=1, name="inception_4d_pool")
+        inception_4e_output = merge_ops.merge(
+            [inception_4e_1_1, inception_4e_3_3, inception_4e_5_5, inception_4e_pool_1_1],
+            mode="concat", axis=3, name="inception_4d_output")
+
+        pool4_3_3 = conv.max_pool_2d(
+            inception_4e_output, kernel_size=3, strides=2, name="pool4_3_3")
+
+        # 5a
+        inception_5a_1_1 = conv.conv_2d(
+            pool4_3_3, 256, filter_size=1, activation="relu", name="inception_5a_1_1")
+        inception_5a_3_3 = conv.conv_2d(
+            conv.conv_2d(pool4_3_3, 160, filter_size=1, activation="relu"),
+            320, filter_size=3, activation="relu", name="inception_5a_3_3")
+        inception_5a_5_5 = conv.conv_2d(
+            conv.conv_2d(pool4_3_3, 32, filter_size=1, activation="relu"),
+            128, filter_size=5, activation="relu", name="inception_5a_5_5")
+        inception_5a_pool_1_1 = conv.conv_2d(
+            conv.max_pool_2d(pool4_3_3, kernel_size=3, strides=1),
+            128, filter_size=1, name="inception_5a_pool")
+        inception_5a_output = merge_ops.merge(
+            [inception_5a_1_1, inception_5a_3_3, inception_5a_5_5, inception_5a_pool_1_1],
+            mode="concat", axis=3, name="inception_5a_output")
+
+        # 5b
+        inception_5b_1_1 = conv.conv_2d(
+            inception_5a_output, 256, filter_size=1, activation="relu", name="inception_5b_1_1")
+        inception_5b_3_3 = conv.conv_2d(
+            conv.conv_2d(inception_5a_output, 160, filter_size=1, activation="relu"),
+            320, filter_size=3, activation="relu", name="inception_5b_3_3")
+        inception_5b_5_5 = conv.conv_2d(
+            conv.conv_2d(inception_5a_output, 32, filter_size=1, activation="relu"),
+            128, filter_size=5, activation="relu", name="inception_5b_5_5")
+        inception_5b_pool_1_1 = conv.conv_2d(
+            conv.max_pool_2d(inception_5a_output, kernel_size=3, strides=1),
+            128, filter_size=1, name="inception_5b_pool")
+        inception_5b_output = merge_ops.merge(
+            [inception_5b_1_1, inception_5b_3_3, inception_5b_5_5, inception_5b_pool_1_1],
+            mode="concat", axis=3, name="inception_5b_output")
+
+        pool5_7_7 = core.dropout(
+            conv.avg_pool_2d(inception_5b_output, kernel_size=7, strides=1),
+            0.4)
+
+        # fc
+        loss = core.fully_connected(pool5_7_7, 17, activation="softmax")
+        network = estimator.regression(
+            loss,
+            optimizer="momentum",
+            loss="categorical_crossentropy",
+            learning_rate=self.LEARNING_RATE)
+        self.model = tflearn.DNN(
+            network, checkpoint_path="model_googlenet",
+            max_checkpoints=1, tensorboard_verbose=2)
+
+    def _train(self, dataset_provider=None):
+        self.model.fit(
+            self.X, self.Y,
+            n_epoch=1000, validation_set=0.1,
+            shuffle=True, show_metric=True,
+            batch_size=64, snapshot_step=200,
+            snapshot_epoch=False, run_id="googlenet_oxflower17")
 
     def _predict(self, x):
         return self.run(tf.argmax(self.model, 1), feed_dict={self.X: x})
@@ -197,28 +330,9 @@ class CNNAgent(AbstractAgent):
 
 # entry point
 if __name__ == "__main__":
-    is_trainmode = False
-    dataset_provider = None
-    target_data_set = None
+    is_trainmode = True
 
-    # used to train and test CNN agent
-    if is_trainmode:
-        dataset_provider = DataSetProvider()
-    else:
-        target_data_set = {}
-        for filename in os.listdir("target_images"):
-            fullpath = "target_images/{}".format(filename)
-            if os.path.isdir(fullpath):
-                continue
-
-            img = Image.open(fullpath).resize((30, 30)).convert("L")
-            target_data_set[filename.split(".")[0]] = \
-                (1. - (np.asarray(img) / 255)).reshape(1, 30, 30, 1)
-
-    with CNNAgent() as agent:
+    # used to train and test GoogLeNet agent
+    with GoogLeNetAgent() as agent:
         if is_trainmode:
-            agent.train(dataset_provider)
-        else:
-            for key, data in target_data_set.items():
-                res = agent.predict(data)
-                print("Key: {}, Read: {}".format(key, chr(res + 97)))
+            agent.train()

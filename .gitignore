@@ -3,3 +3,8 @@ model/
 mnist/
 train_data/debug/
 target_images/
+17flowers/
+model_googlenet-400.meta
+model_googlenet-400.index
+model_googlenet-400.data-00000-of-00001
+checkpoint
