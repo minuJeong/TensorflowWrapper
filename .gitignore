@@ -8,3 +8,6 @@ model_googlenet-400.meta
 model_googlenet-400.index
 model_googlenet-400.data-00000-of-00001
 checkpoint
+*.meta
+*.index
+*.data-00000-of-00001

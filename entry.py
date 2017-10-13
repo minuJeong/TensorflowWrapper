@@ -1,126 +1,13 @@
 
-import tensorflow as tf
-import numpy as np
-from PIL import Image
+w = 227
+h = 227
 
 
-class DataSetProvider(object):
+class GoogLeNetAgent(object):
 
-    _data_pool = None
-
-    def __init__(self):
-        print("initializing data set provider..")
-
-    @property
-    def data_pool(self):
-        if not self._data_pool:
-            w = 30
-            h = 30
-            self._data_pool = {}
-            img = Image.open("train_data/alphabet.png").convert("L")
-            y_count = (int)(img.size[1] / h)
-            print(y_count)
-            # for x in range(26):
-            for x in range(3):
-                dataset = []
-                for y in range(y_count):
-                    rect = (x * w, y * h, x * w + w, y * h + h)
-                    data = (1. - (np.asarray(img.crop(rect)) / 255.)).reshape(-1, w, h, 1)
-                    dataset.append(data)
-
-                self._data_pool[x] = np.array(dataset)
-        return self._data_pool
-
-    def iterate_batch(self):
-        REPEAT_TIME = 1
-        for _ in range(REPEAT_TIME):
-            for x, dataset in self.data_pool.items():
-                label = np.zeros(shape=(26))
-                label[x] = 1
-
-                for data in dataset:
-                    yield data, label
-
-
-class AbstractAgent(object):
-    MODEL_PATH = "./model"
-    MODEL_CKP_PATH = "./model/agent.ckpt"
-    LOG_PATH = "./log/"
     LEARNING_RATE = 0.001
 
-    global_step = None
-    session = None
-    saver = None
-
     def __init__(self):
-        self.global_step = tf.Variable(0, trainable=False, name="global_step")
-
-        print("initializing model..")
-        self._build_model()
-
-        print("initialized model!")
-
-    def _build_model(self):
-        """ override this """
-        pass
-
-    @property
-    def run(self):
-        """ shortcut to session.run """
-        return self.session.run
-
-    def __enter__(self):
-        self.session = tf.Session()
-        self.saver = tf.train.Saver()
-        ckpt = tf.train.get_checkpoint_state(AbstractAgent.MODEL_PATH)
-        if ckpt and tf.train.checkpoint_exists(AbstractAgent.MODEL_PATH):
-            print("loading saved model checkpoint")
-            self.saver.restore(self.session, ckpt.model_checkpoint_path)
-        else:
-            print("no checkpoint is found,")
-            self.session.run(tf.global_variables_initializer())
-        return self
-
-    def __exit__(self, type, value, traceback):
-        print("disposing agent, saving session..")
-
-        if self.saver:
-            self.saver.save(
-                self.session,
-                AbstractAgent.MODEL_CKP_PATH,
-                global_step=self.global_step
-            )
-
-        if self.session:
-            self.session.close()
-
-        print("session disposed!")
-
-    def _train(self, dataset_provider=None):
-        """ override this """
-        pass
-
-    def _evaluate(self):
-        """ override this """
-        pass
-
-    def _predict(self, x):
-        """ override this """
-        pass
-
-    def train(self, dataset_provider=None):
-        self.merge = tf.summary.merge_all()
-        self._train(dataset_provider)
-
-    def evaluate(self):
-        self._evaluate()
-
-    def predict(self, x):
-        return self._predict(x)
-
-
-class GoogLeNetAgent(AbstractAgent):
-    def _build_model(self) -> None:
         """
         Just following the googlenet example:
          - https://github.com/tflearn/tflearn/blob/master/examples/images/googlenet.py
@@ -135,8 +22,6 @@ class GoogLeNetAgent(AbstractAgent):
 
         from tflearn.datasets import oxflower17
 
-        w = 227
-        h = 227
         self.X, self.Y = oxflower17.load_data(one_hot=True, resize_pics=(w, h))
         print("X, Y shape: ", self.X.shape, self.Y.shape)
 
@@ -316,23 +201,27 @@ class GoogLeNetAgent(AbstractAgent):
             network, checkpoint_path="model_googlenet",
             max_checkpoints=1, tensorboard_verbose=2)
 
-    def _train(self, dataset_provider=None):
+    def train(self, n_epoch=1):
         self.model.fit(
             self.X, self.Y,
-            n_epoch=1000, validation_set=0.1,
+            n_epoch=n_epoch, validation_set=0.1,
             shuffle=True, show_metric=True,
             batch_size=64, snapshot_step=200,
             snapshot_epoch=False, run_id="googlenet_oxflower17")
 
-    def _predict(self, x):
-        return self.run(tf.argmax(self.model, 1), feed_dict={self.X: x})
-
+    def predict(self, x):
+        return self.model.predict(x)
 
 # entry point
 if __name__ == "__main__":
-    is_trainmode = True
+
+    from PIL import Image
+    import numpy as np
+    img = Image.open("target_images/test.jpg").resize((w, h), Image.ANTIALIAS)
 
     # used to train and test GoogLeNet agent
-    with GoogLeNetAgent() as agent:
-        if is_trainmode:
-            agent.train()
+    agent = GoogLeNetAgent()
+    agent.train(10)
+    res = agent.predict(np.asarray(img).reshape(1, w, h, 3))
+    print(res)
+    print(np.argmax(res), np.max(res))
